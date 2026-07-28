@@ -1,0 +1,90 @@
+name: Deploy DueCare continuity site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Public gemma4_comp branch, tag, or commit to publish
+        required: false
+        default: master
+        type: string
+  schedule:
+    - cron: "17 9 * * *"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and validate read-only site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out public source
+        uses: actions/checkout@v7
+        with:
+          repository: TaylorAmarelTech/gemma4_comp
+          ref: ${{ inputs.source_ref || 'master' }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Record resolved source revision
+        id: source
+        shell: bash
+        run: echo "revision=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: source/apps/duecare-ai.com/requirements.txt
+
+      - name: Install website dependencies
+        run: pip install -r source/apps/duecare-ai.com/requirements.txt httpx httpx2
+
+      - name: Build backend-free project-path site
+        working-directory: source/apps/duecare-ai.com
+        run: >-
+          python scripts/export_static.py
+          --out "${{ github.workspace }}/site"
+          --fallback
+          --base-path /duecare-ai-site
+          --site-url https://tayloramareltech.github.io/duecare-ai-site
+          --source-revision ${{ steps.source.outputs.revision }}
+          --omit-cname
+
+      - name: Validate public artifact and trust boundary
+        working-directory: source/apps/duecare-ai.com
+        run: >-
+          python scripts/validate_static_fallback.py
+          --site "${{ github.workspace }}/site"
+          --base-path /duecare-ai-site
+          --site-url https://tayloramareltech.github.io/duecare-ai-site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Deploy GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
